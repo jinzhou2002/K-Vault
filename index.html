@@ -19,29 +19,32 @@
     />
 <style>
       :root {
-        --primary-color: #8a4bff;
-        --primary-light: #b39ddb;
-        --primary-dark: #6c3ce0;
-        --accent-color: #ffd7e4;
-        --success-color: #67c23a;
-        --warning-color: #e6a23c;
-        --danger-color: #f56c6c;
-        --info-color: #909399;
-        --bg-gradient: linear-gradient(135deg, #ffd7e4 0%, #c8f1ff 100%);
-        --card-bg: rgba(255, 255, 255, 0.92);
-        --shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
-        --shadow-hover: 0 8px 24px rgba(138, 75, 255, 0.15);
-        --text-primary: #2f3243;
-        --text-secondary: #555d72;
-        --text-muted: #8b93aa;
+        --primary-color: #0f766e;
+        --primary-light: #2dd4bf;
+        --primary-dark: #115e59;
+        --accent-color: #f59e0b;
+        --success-color: #16a34a;
+        --warning-color: #d97706;
+        --danger-color: #e11d48;
+        --info-color: #64748b;
+        --bg-gradient:
+          radial-gradient(1200px 600px at 8% -10%, rgba(45, 212, 191, 0.28), transparent 55%),
+          radial-gradient(900px 500px at 92% 0%, rgba(245, 158, 11, 0.18), transparent 50%),
+          linear-gradient(165deg, #f4f7f6 0%, #e8eef0 42%, #dfe9e8 100%);
+        --card-bg: rgba(255, 255, 255, 0.78);
+        --shadow: 0 10px 30px rgba(15, 61, 58, 0.08);
+        --shadow-hover: 0 16px 36px rgba(15, 118, 110, 0.16);
+        --text-primary: #132422;
+        --text-secondary: #3d524f;
+        --text-muted: #6b7f7c;
         --surface-1: #ffffff;
-        --surface-2: rgba(255, 255, 255, 0.82);
-        --surface-3: #f0f3fa;
-        --surface-border: rgba(255, 255, 255, 0.55);
-        --input-border: #e8eaf2;
-        --warning-text-color: #b88230;
-        --border-radius: 16px;
-        --transition: all 0.2s ease;
+        --surface-2: rgba(255, 255, 255, 0.72);
+        --surface-3: #eef5f4;
+        --surface-border: rgba(15, 118, 110, 0.12);
+        --input-border: #d5e3e1;
+        --warning-text-color: #9a6700;
+        --border-radius: 18px;
+        --transition: all 0.22s cubic-bezier(0.22, 1, 0.36, 1);
       }
 
       html[data-theme="dark"] {
@@ -2353,6 +2356,7 @@
       }
     </style>
     <link rel="stylesheet" href="/mobile-refactor.css">
+    <link rel="stylesheet" href="/skin-vault.css?v=20260929">
   </head>
   <body>
     <div id="app" v-cloak>
@@ -2393,6 +2397,8 @@
           </a>
         </div>
       </div>
+
+      <p class="brand-tagline">私人图床金库 · 拖拽即传 · 自动短链分享</p>
 
       <!-- 访客模式提示条 -->
       <div class="guest-notice" v-if="!authChecking && isGuest && guestUploadConfig">
@@ -2921,6 +2927,10 @@
               @click="linkFormat = 'ubb'"
               >UBB</span
             >
+            <label class="toolbar-chip" title="上传成功后自动复制短链">
+              <input type="checkbox" v-model="autoCopyShortLink" @change="persistAutoCopyPref" />
+              上传后自动复制
+            </label>
           </div>
 
           <!-- 上传结果列表 -->
@@ -2943,7 +2953,12 @@
                 onerror="this.style.display='none'"
               />
               <div class="result-item-info">
-                <div class="result-item-name">{{ getDisplayName(file) }}</div>
+                <div class="result-item-name">
+                  {{ getDisplayName(file) }}
+                  <span class="short-badge" v-if="isShortLink(file)"
+                    ><i class="fas fa-link"></i> 短链</span
+                  >
+                </div>
                 <div
                   class="result-item-link"
                   @click="copyLink(file)"
@@ -3404,6 +3419,7 @@
           uploadedFiles: [],
           uploadHistory: [],
           linkFormat: "url",
+          autoCopyShortLink: true,
           previewData: null, // 新的预览数据对象
           toasts: [],
           isAuthenticated: false,
@@ -4019,6 +4035,7 @@
 
                 this.uploadedFiles.unshift(uploadedFile);
                 this.addToHistory(uploadedFile);
+                this.maybeAutoCopyLink(uploadedFile);
                 this.showToast(
                   `成功从URL上传到 ${this.storageTarget}`,
                   "success",
@@ -4846,6 +4863,47 @@
 
             this.uploadedFiles.unshift(uploadedFile);
             this.addToHistory(uploadedFile);
+            this.maybeAutoCopyLink(uploadedFile);
+          },
+
+          isShortLink(file) {
+            const path = String(file?.path || file?.shortSrc || file?.url || "");
+            return /\/s\/[a-z0-9_-]{1,64}/i.test(path);
+          },
+
+          persistAutoCopyPref() {
+            try {
+              localStorage.setItem(
+                "kvault_auto_copy_short",
+                this.autoCopyShortLink ? "1" : "0",
+              );
+            } catch (e) {
+              // ignore
+            }
+          },
+
+          loadAutoCopyPref() {
+            try {
+              const raw = localStorage.getItem("kvault_auto_copy_short");
+              if (raw === null) return;
+              this.autoCopyShortLink = raw === "1" || raw === "true";
+            } catch (e) {
+              // ignore
+            }
+          },
+
+          async maybeAutoCopyLink(file) {
+            if (!this.autoCopyShortLink || !file) return;
+            try {
+              const link = this.formatLink(file);
+              await this.copyToClipboard(link);
+              this.showToast(
+                this.isShortLink(file) ? "短链已自动复制" : "链接已自动复制",
+                "success",
+              );
+            } catch (e) {
+              // ignore auto-copy failures
+            }
           },
 
           // 格式化链接
@@ -4879,7 +4937,10 @@
             try {
               const link = this.formatLink(file);
               await this.copyToClipboard(link);
-              this.showToast("链接已复制", "success");
+              this.showToast(
+                this.isShortLink(file) ? "短链已复制" : "链接已复制",
+                "success",
+              );
             } catch (err) {
               this.showToast("复制失败，请手动复制", "error");
             }
@@ -5763,6 +5824,7 @@
 
           // 加载历史记录
           this.loadHistory();
+          this.loadAutoCopyPref();
 
           // 全局粘贴事件
           this.globalPasteHandler = async (e) => {

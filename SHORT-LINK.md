@@ -1,40 +1,34 @@
-# K-Vault 短链补丁
+# K-Vault 界面美化 + 短链优化
 
-上传成功后默认返回短链，例如：
+## 视觉
 
-```
-https://你的域名/s/a1b2c3
-```
+- 新皮肤 `skin-vault.css`：青绿矿物金库风格（告别默认紫色）
+- 字体：Syne（品牌）+ Manrope（正文）
+- 氛围背景：径向光斑 + 细网格
+- 首页品牌副标题、上传区动效、短链徽章
 
-并且：
-- 打开短链时**不再 302 跳转**到长链（地址栏保持短链，复制图片地址也是短链）
-- 首页 / 后台 / 图库复制链接时优先使用短链
-- 旧文件在后台点击复制时会自动生成短链
+## 功能
 
-## 需要覆盖的文件
+- 上传成功默认**自动复制短链**（可关掉，偏好会记住）
+- 结果列表显示「短链」徽章
+- 复制提示区分短链 / 普通链接
+- 继续沿用上一版：`/s/` 代理不跳转、后台/图库复制短链
 
-| 文件 | 说明 |
-|------|------|
-| `functions/utils/short-link.js` | 短链工具（新建/覆盖） |
-| `functions/s/[slug].js` | 短链改为代理，不再跳转 |
-| `functions/api/manage/short-link.js` | 后台按需生成短链（新建） |
-| `functions/upload.js` | 上传返回短链 |
-| `functions/api/telegram/webhook.js` | TG 回链短链 |
-| `functions/api/upload-from-url.js` | URL 上传短链 |
-| `index.html` | 首页复制保留短链 |
-| `admin.html` | 后台复制用短链 |
-| `gallery.html` | 图库复制用短链 |
+## 上传这些文件到 GitHub
 
-## 前提
+覆盖到仓库根目录对应路径：
 
-1. Cloudflare Pages 已绑定 KV：`img_url`
-2. 覆盖文件后重新部署
-3. 部署后建议 **强制刷新** 页面（Ctrl+F5），避免旧 JS 缓存
+| 文件 |
+|------|
+| `skin-vault.css`（新建） |
+| `index.html` |
+| `admin.html` |
+| `gallery.html` |
+| `functions/utils/short-link.js` |
+| `functions/s/[slug].js` |
+| `functions/api/manage/short-link.js` |
+| `functions/upload.js` |
+| `functions/api/telegram/webhook.js` |
+| `functions/api/upload-from-url.js` |
 
-## 可选环境变量
-
-| 变量 | 默认 | 说明 |
-|------|------|------|
-| `ENABLE_SHORT_URLS` | 有 KV 时默认开启 | 设为 `false` 关闭短链 |
-| `SHORT_URL_LENGTH` | `6` | 短码长度 4–16 |
-| `PUBLIC_BASE_URL` | 可选 | TG 通知用的完整域名 |
+部署后 **Ctrl+F5** 强刷。
