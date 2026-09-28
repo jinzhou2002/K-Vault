@@ -3920,14 +3920,44 @@ curl -X POST "{SITE_URL}/api/v1/import" \
         document.execCommand('copy');
         document.body.removeChild(textarea);
       },
-      handleCopy(index, key) {
-        const link = `${this.baseURL}/file/${key}`;
+      async resolvePublicFileUrl(key) {
+        const file = this.tableData.find(f => f.name === key);
+        const cachedSlug = file?.metadata?.shortSlug;
+        if (cachedSlug && /^[a-z0-9_-]{1,64}$/i.test(String(cachedSlug))) {
+          return `${this.baseURL}/s/${String(cachedSlug).toLowerCase()}`;
+        }
+        try {
+          const res = await fetch(`${this.baseURL}/api/manage/short-link`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ id: key }),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (data?.slug && file?.metadata) {
+              file.metadata.shortSlug = data.slug;
+            }
+            if (data?.url) return data.url;
+            if (data?.src) {
+              return String(data.src).startsWith('http')
+                ? data.src
+                : `${this.baseURL}${data.src}`;
+            }
+          }
+        } catch (e) {
+          console.warn('ensure short link failed', e);
+        }
+        return `${this.baseURL}/file/${key}`;
+      },
+      async handleCopy(index, key) {
+        const link = await this.resolvePublicFileUrl(key);
         (navigator.clipboard?.writeText(link) || this.copyToClipboardFallback(link))
           .then(() => this.$message.success('复制文件链接成功~'))
           .catch(() => this.$message.error('自动复制失败，请手动复制链接：' + link));
       },
-      handleQuickCopy(format, key) {  // 快速复制不同格式
-        const url = `${this.baseURL}/file/${key}`;
+      async handleQuickCopy(format, key) {  // 快速复制不同格式
+        const url = await this.resolvePublicFileUrl(key);
         const file = this.tableData.find(f => f.name === key);
         const name = file?.metadata?.fileName || key;
         let link = url;
@@ -4007,27 +4037,35 @@ curl -X POST "{SITE_URL}/api/v1/import" \
             .catch(() => this.$message.error('批量删除失败，请检查网络连接'));
         }).catch(() => this.$message.info('已取消批量删除'));
       },
-      handleBatchCopy() {  // 批量复制链接
-        const links = this.selectedFiles.map(file => `${document.location.origin}/file/${file.name}`).join('\n');
-        (navigator.clipboard?.writeText(links) || this.copyToClipboardFallback(links))
+      async handleBatchCopy() {  // 批量复制链接
+        const links = [];
+        for (const file of this.selectedFiles) {
+          links.push(await this.resolvePublicFileUrl(file.name));
+        }
+        const text = links.join('\n');
+        (navigator.clipboard?.writeText(text) || this.copyToClipboardFallback(text))
           .then(() => this.$message.success('批量复制链接成功~'));
       },
-      handleBatchCopyMarkdown() {  // 批量复制Markdown格式
-        const links = this.selectedFiles.map(file => {
-          const url = `${document.location.origin}/file/${file.name}`;
+      async handleBatchCopyMarkdown() {  // 批量复制Markdown格式
+        const links = [];
+        for (const file of this.selectedFiles) {
+          const url = await this.resolvePublicFileUrl(file.name);
           const name = file.metadata?.fileName || file.name;
-          return `![${name}](${url})`;
-        }).join('\n');
-        (navigator.clipboard?.writeText(links) || this.copyToClipboardFallback(links))
+          links.push(`![${name}](${url})`);
+        }
+        const text = links.join('\n');
+        (navigator.clipboard?.writeText(text) || this.copyToClipboardFallback(text))
           .then(() => this.$message.success('Markdown格式链接已复制~'));
       },
-      handleBatchCopyHtml() {  // 批量复制HTML格式
-        const links = this.selectedFiles.map(file => {
-          const url = `${document.location.origin}/file/${file.name}`;
+      async handleBatchCopyHtml() {  // 批量复制HTML格式
+        const links = [];
+        for (const file of this.selectedFiles) {
+          const url = await this.resolvePublicFileUrl(file.name);
           const name = file.metadata?.fileName || file.name;
-          return `<img src="${url}" alt="${name}">`;
-        }).join('\n');
-        (navigator.clipboard?.writeText(links) || this.copyToClipboardFallback(links))
+          links.push(`<img src="${url}" alt="${name}">`);
+        }
+        const text = links.join('\n');
+        (navigator.clipboard?.writeText(text) || this.copyToClipboardFallback(text))
           .then(() => this.$message.success('HTML格式链接已复制~'));
       },
       handleBatchDownload() {  // 批量下载

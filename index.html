@@ -4011,6 +4011,7 @@
                   fileName: fileName,
                   url: `${this.baseURL}${src}`,
                   path: src,
+                  shortSrc: String(src).startsWith("/s/") ? src : null,
                   size: 0, // URL上传无法预知大小
                   selected: false,
                   uploadTime: Date.now(),
@@ -4831,11 +4832,13 @@
 
           // 处理上传成功
           handleUploadSuccess(item, src) {
+            const publicPath = String(src || "");
             const uploadedFile = {
               name: item.file.name, // 原始文件名
               fileName: item.file.name, // 保存原始文件名用于显示
-              url: `${this.baseURL}${src}`,
-              path: src,
+              url: `${this.baseURL}${publicPath}`,
+              path: publicPath,
+              shortSrc: publicPath.startsWith("/s/") ? publicPath : null,
               size: item.file.size,
               selected: false,
               uploadTime: Date.now(),
@@ -5146,18 +5149,29 @@
             return "未知文件";
           },
 
-          // 核心方法：从污染的 URL 中提取干净的文件直链
-          // 无论输入是 ID、路径、还是完整 URL，都返回标准格式：https://pan.katelya.eu.org/file/{id}.{ext}
+          // 核心方法：提取可复制的公开链接（优先短链 /s/xxx）
           getCleanFileUrl(item) {
+            // 优先使用上传时保存的短链路径
+            if (item?.path && /^\/s\/[a-z0-9_-]{1,64}$/i.test(item.path)) {
+              return `${this.baseURL}${item.path}`;
+            }
+            if (item?.shortSrc && /^\/s\/[a-z0-9_-]{1,64}$/i.test(item.shortSrc)) {
+              return `${this.baseURL}${item.shortSrc}`;
+            }
+
             let rawUrl = item.url || item.path || "";
 
-            // 情况1: 已经是标准直链格式 https://pan.katelya.eu.org/file/xxx.ext
+            // 短链：https://domain/s/xxxxxx 或 /s/xxxxxx
+            const shortMatch = String(rawUrl).match(/\/s\/([a-z0-9_-]{1,64})(?:[?#]|$)/i);
+            if (shortMatch) {
+              return `${this.baseURL}/s/${shortMatch[1].toLowerCase()}`;
+            }
+
+            // 情况1: 已经是标准直链格式 https://.../file/xxx.ext
             if (rawUrl.startsWith("https://") && rawUrl.includes("/file/")) {
-              // 提取 /file/ 后面的部分作为 fileId
               const match = rawUrl.match(/\/file\/([^?#]+)/);
               if (match) {
-                const fileId = match[1];
-                return `${this.baseURL}/file/${fileId}`;
+                return `${this.baseURL}/file/${match[1]}`;
               }
             }
 
@@ -5172,24 +5186,23 @@
             }
 
             // 情况4: 污染的 URL（如 /file/https://... 或其他异常格式）
-            // 尝试提取最后的文件ID部分
             const lastSegment = rawUrl.split("/").pop().split("?")[0];
             if (lastSegment && lastSegment.includes(".")) {
               return `${this.baseURL}/file/${lastSegment}`;
             }
 
-            // 兜底：返回原始 URL
             return rawUrl;
           },
 
-          // 从 URL 中提取干净的文件路径（不带域名，格式：/file/xxx.ext）
+          // 从 URL 中提取干净的文件路径（优先 /s/，否则 /file/）
           getCleanFilePath(item) {
             const fullUrl = this.getCleanFileUrl(item);
             try {
               const url = new URL(fullUrl);
               return url.pathname;
             } catch {
-              // 如果解析失败，尝试直接提取
+              const shortMatch = fullUrl.match(/(\/s\/[a-z0-9_-]+)/i);
+              if (shortMatch) return shortMatch[1];
               const match = fullUrl.match(/(\/file\/[^?#]+)/);
               return match ? match[1] : fullUrl;
             }

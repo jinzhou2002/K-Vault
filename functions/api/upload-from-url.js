@@ -390,7 +390,9 @@ async function processTelegramSuccess(responseData, fileName, fileExtension, mim
     });
   }
 
-  const publicSrc = await buildPublicSrc(env, directId);
+  const publicSrc = await buildPublicSrc(env, directId, {
+    metadataKey: `${fileId}.${fileExtension}`,
+  });
   const directLink = buildAbsolutePublicUrl(env, publicSrc, fallbackOrigin);
   try {
     const noticeResult = await sendTelegramUploadNotice(

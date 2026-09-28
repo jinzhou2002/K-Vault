@@ -85,7 +85,9 @@ export async function onRequestPost(context) {
     });
   }
 
- const publicSrc = await buildPublicSrc(env, directId);
+ const publicSrc = await buildPublicSrc(env, directId, {
+ metadataKey: `${media.fileId}.${media.fileExtension}`,
+ });
  const directLink = buildAbsolutePublicUrl(
  env,
  publicSrc,

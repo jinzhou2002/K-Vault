@@ -1,4 +1,4 @@
-const SHARE_SLUG_KEY_PREFIX = 'share_slug:';
+import { SHARE_SLUG_KEY_PREFIX } from '../utils/short-link.js';
 
 function decodePathParam(rawValue = '') {
   try {
@@ -14,6 +14,10 @@ function normalizeSlug(rawValue = '') {
   return value;
 }
 
+/**
+ * Serve short links by proxying /file/* (no 302).
+ * Keeps the browser URL as /s/xxxxxx so copy-link stays short.
+ */
 export async function onRequest(context) {
   const { request, env, params } = context;
   const rawValue = decodePathParam(params?.slug || '');
@@ -36,11 +40,13 @@ export async function onRequest(context) {
     targetId = rawValue;
   }
 
-  const redirectUrl = new URL(`/file/${encodeURIComponent(targetId)}`, request.url);
+  const targetUrl = new URL(`/file/${encodeURIComponent(targetId)}`, request.url);
   const sourceUrl = new URL(request.url);
   sourceUrl.searchParams.forEach((value, key) => {
-    redirectUrl.searchParams.set(key, value);
+    targetUrl.searchParams.set(key, value);
   });
 
-  return Response.redirect(redirectUrl.toString(), 302);
+  // Proxy instead of redirect so address bar / "copy image address" stay short.
+  const proxyRequest = new Request(targetUrl.toString(), request);
+  return fetch(proxyRequest);
 }

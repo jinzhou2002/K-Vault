@@ -1168,7 +1168,10 @@
         },
 
         formatLink(img) {
-          const url = `${this.baseURL}/file/${img.name}`;
+          const slug = img?.metadata?.shortSlug;
+          const url = (slug && /^[a-z0-9_-]{1,64}$/i.test(String(slug)))
+            ? `${this.baseURL}/s/${String(slug).toLowerCase()}`
+            : `${this.baseURL}/file/${img.name}`;
           const name = img.metadata?.fileName || img.name;
           switch (this.linkFormat) {
             case 'markdown': return `![${name}](${url})`;
@@ -1178,8 +1181,37 @@
           }
         },
 
-        copyLink(img) {
-          const link = this.formatLink(img);
+        async copyLink(img) {
+          let link = this.formatLink(img);
+          if (!img?.metadata?.shortSlug) {
+            try {
+              const res = await fetch(`${this.baseURL}/api/manage/short-link`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({ id: img.name }),
+              });
+              if (res.ok) {
+                const data = await res.json();
+                if (data?.slug) {
+                  if (!img.metadata) img.metadata = {};
+                  img.metadata.shortSlug = data.slug;
+                }
+                if (data?.url) link = data.url;
+                else if (data?.src) {
+                  link = String(data.src).startsWith('http')
+                    ? data.src
+                    : `${this.baseURL}${data.src}`;
+                }
+                // Re-format with preferred link style
+                if (this.linkFormat !== 'url' && this.linkFormat) {
+                  link = this.formatLink(img);
+                }
+              }
+            } catch (e) {
+              console.warn('ensure short link failed', e);
+            }
+          }
           this.copyToClipboard(link);
           this.showToast('链接已复制', 'success');
         },

@@ -1,6 +1,8 @@
 /**
  * Short public links for K-Vault.
  * Maps share_slug:{slug} -> real /file id (used by functions/s/[slug].js).
+ * Maps short_of:{fileId} -> slug (reuse + admin lookup).
+ * Also writes metadata.shortSlug on the file KV record when possible.
  *
  * Env:
  *   ENABLE_SHORT_URLS  - default on when KV is bound; set "false" to disable
@@ -8,6 +10,7 @@
  */
 
 export const SHARE_SLUG_KEY_PREFIX = "share_slug:";
+export const SHORT_OF_KEY_PREFIX = "short_of:";
 
 function isTruthy(value, defaultValue = false) {
   const normalized = String(value ?? "")
@@ -25,7 +28,6 @@ function isTruthy(value, defaultValue = false) {
 
 export function shouldEnableShortUrls(env) {
   if (!env?.img_url) return false;
-  // Default ON when KV is available; explicitly set false to keep long /file links.
   return isTruthy(env.ENABLE_SHORT_URLS, true);
 }
 
@@ -45,15 +47,65 @@ function generateSlug(length) {
   return out;
 }
 
+async function writeShortSlugMetadata(env, metadataKey, slug) {
+  if (!env?.img_url || !metadataKey || !slug) return;
+  try {
+    const existing = await env.img_url.getWithMetadata(metadataKey);
+    if (existing == null) return;
+    const metadata = { ...(existing.metadata || {}) };
+    if (metadata.shortSlug === slug) return;
+    metadata.shortSlug = slug;
+    await env.img_url.put(metadataKey, existing.value || "", { metadata });
+  } catch (error) {
+    console.warn("writeShortSlugMetadata failed:", error?.message || error);
+  }
+}
+
 /**
- * Create a short slug mapped to the real file id used by /file/*.
- * @returns {Promise<string|null>} slug or null if short links unavailable
+ * Resolve an existing short slug for a file id (if any).
  */
-export async function createShareSlug(env, fileId) {
+export async function resolveExistingSlug(env, fileId) {
+  if (!env?.img_url) return null;
+  const targetId = String(fileId || "").trim();
+  if (!targetId) return null;
+  try {
+    const slug = await env.img_url.get(`${SHORT_OF_KEY_PREFIX}${targetId}`);
+    return slug ? String(slug) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Create or reuse a short slug mapped to the real file id used by /file/*.
+ * @param {{ metadataKey?: string }} [options]
+ * @returns {Promise<string|null>}
+ */
+export async function createShareSlug(env, fileId, options = {}) {
   if (!shouldEnableShortUrls(env)) return null;
 
   const targetId = String(fileId || "").trim();
   if (!targetId) return null;
+
+  const metadataKey =
+    options.metadataKey ||
+    (String(targetId).startsWith("tgs_") ? "" : targetId) ||
+    "";
+
+  const existingSlug = await resolveExistingSlug(env, targetId);
+  if (existingSlug) {
+    // Ensure forward map still exists
+    try {
+      const forward = await env.img_url.get(`${SHARE_SLUG_KEY_PREFIX}${existingSlug}`);
+      if (!forward) {
+        await env.img_url.put(`${SHARE_SLUG_KEY_PREFIX}${existingSlug}`, targetId);
+      }
+    } catch {
+      // ignore
+    }
+    await writeShortSlugMetadata(env, metadataKey, existingSlug);
+    return existingSlug;
+  }
 
   const baseLength = getSlugLength(env);
 
@@ -66,6 +118,8 @@ export async function createShareSlug(env, fileId) {
       const existing = await env.img_url.get(key);
       if (existing) continue;
       await env.img_url.put(key, targetId);
+      await env.img_url.put(`${SHORT_OF_KEY_PREFIX}${targetId}`, slug);
+      await writeShortSlugMetadata(env, metadataKey, slug);
       return slug;
     } catch (error) {
       console.warn("createShareSlug failed:", error?.message || error);
@@ -78,12 +132,44 @@ export async function createShareSlug(env, fileId) {
 
 /**
  * Prefer /s/{slug}; fall back to /file/{id}.
+ * @param {{ metadataKey?: string }} [options]
  */
-export async function buildPublicSrc(env, fileId) {
+export async function buildPublicSrc(env, fileId, options = {}) {
   const id = String(fileId || "").trim();
   if (!id) return "/file/";
 
-  const slug = await createShareSlug(env, id);
+  const slug = await createShareSlug(env, id, options);
+  if (slug) return `/s/${slug}`;
+  return `/file/${id}`;
+}
+
+/**
+ * Ensure a short link exists for a dashboard file record.
+ * Tries metadata.shortSlug, reverse index, then creates a new mapping.
+ * Dashboard record id is usually the same as /file/{id}.
+ */
+export async function ensureShortSrcForRecord(env, recordId) {
+  const id = String(recordId || "").trim();
+  if (!id) return null;
+  if (!shouldEnableShortUrls(env)) return `/file/${id}`;
+
+  try {
+    const record = await env.img_url.getWithMetadata(id);
+    const metaSlug = record?.metadata?.shortSlug;
+    if (metaSlug && /^[a-z0-9_-]{1,64}$/i.test(String(metaSlug))) {
+      const slug = String(metaSlug).toLowerCase();
+      const mapped = await env.img_url.get(`${SHARE_SLUG_KEY_PREFIX}${slug}`);
+      if (!mapped) {
+        await env.img_url.put(`${SHARE_SLUG_KEY_PREFIX}${slug}`, id);
+        await env.img_url.put(`${SHORT_OF_KEY_PREFIX}${id}`, slug);
+      }
+      return `/s/${slug}`;
+    }
+  } catch {
+    // continue
+  }
+
+  const slug = await createShareSlug(env, id, { metadataKey: id });
   if (slug) return `/s/${slug}`;
   return `/file/${id}`;
 }
@@ -138,7 +224,7 @@ export async function rewriteUploadResponseWithShortLinks(response, env) {
       // keep raw
     }
 
-    const shortSrc = await buildPublicSrc(env, fileId);
+    const shortSrc = await buildPublicSrc(env, fileId, { metadataKey: fileId });
     if (shortSrc !== src) {
       item.fileSrc = src;
       item.src = shortSrc;
