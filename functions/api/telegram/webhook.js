@@ -1,11 +1,14 @@
 import {
-  buildTelegramDirectLink,
-  createSignedTelegramFileId,
-  getTelegramFileFromMessage,
-  sendTelegramUploadNotice,
-  shouldUseSignedTelegramLinks,
-  shouldWriteTelegramMetadata,
+ createSignedTelegramFileId,
+ getTelegramFileFromMessage,
+ sendTelegramUploadNotice,
+ shouldUseSignedTelegramLinks,
+ shouldWriteTelegramMetadata,
 } from '../../utils/telegram.js';
+import {
+ buildAbsolutePublicUrl,
+ buildPublicSrc,
+} from '../../utils/short-link.js';
 
 export async function onRequestGet(context) {
   const { request } = context;
@@ -82,8 +85,13 @@ export async function onRequestPost(context) {
     });
   }
 
-  const directLink = buildTelegramDirectLink(env, directId, new URL(request.url).origin);
-  const chatId = message?.chat?.id;
+ const publicSrc = await buildPublicSrc(env, directId);
+ const directLink = buildAbsolutePublicUrl(
+ env,
+ publicSrc,
+ new URL(request.url).origin
+ );
+ const chatId = message?.chat?.id;
   let reply = {
     attempted: false,
     ok: false,
@@ -113,18 +121,20 @@ export async function onRequestPost(context) {
     }
   }
 
-  return jsonResponse({
-    ok: true,
-    directLink,
-    storageType: 'telegram',
-    mode: useSigned ? 'signed' : 'kv',
-    update: {
-      chatId,
-      messageId: message.message_id,
-      mediaKind: media.kind,
-    },
-    reply,
-  });
+ return jsonResponse({
+ ok: true,
+ directLink,
+ src: publicSrc,
+ fileSrc: `/file/${directId}`,
+ storageType: 'telegram',
+ mode: useSigned ? 'signed' : 'kv',
+ update: {
+ chatId,
+ messageId: message.message_id,
+ mediaKind: media.kind,
+ },
+ reply,
+ });
 }
 
 function jsonResponse(body, status = 200) {

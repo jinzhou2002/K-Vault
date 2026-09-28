@@ -4,7 +4,6 @@ import { hasHuggingFaceConfig, uploadToHuggingFace } from "../utils/huggingface.
 import { hasWebDAVConfig, normalizeWebDAVPath, uploadToWebDAV } from "../utils/webdav.js";
 import { hasGitHubConfig, normalizeGitHubStoragePath, uploadToGitHub } from "../utils/github.js";
 import {
-  buildTelegramDirectLink,
   buildTelegramBotApiUrl,
   createSignedTelegramFileId,
   getTelegramUploadMethodAndField,
@@ -13,6 +12,11 @@ import {
   shouldUseSignedTelegramLinks,
   shouldWriteTelegramMetadata,
 } from "../utils/telegram.js";
+import {
+  buildAbsolutePublicUrl,
+  buildPublicSrc,
+  rewriteUploadResponseWithShortLinks,
+} from "../utils/short-link.js";
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024;
 const FETCH_TIMEOUT = 30000;
@@ -71,45 +75,66 @@ export async function onRequestPost(context) {
       if (!env.R2_BUCKET) {
         return jsonResponse({ error: "R2 未配置" }, 400);
       }
-      return await uploadToR2(arrayBuffer, fileName, fileExtension, contentType, fileSize, env, folderPath);
+      return await rewriteUploadResponseWithShortLinks(
+        await uploadToR2(arrayBuffer, fileName, fileExtension, contentType, fileSize, env, folderPath),
+        env
+      );
     }
 
     if (storageMode === "s3") {
       if (!env.S3_ENDPOINT || !env.S3_ACCESS_KEY_ID) {
         return jsonResponse({ error: "S3 未配置" }, 400);
       }
-      return await uploadToS3(arrayBuffer, fileName, fileExtension, contentType, fileSize, env, folderPath);
+      return await rewriteUploadResponseWithShortLinks(
+        await uploadToS3(arrayBuffer, fileName, fileExtension, contentType, fileSize, env, folderPath),
+        env
+      );
     }
 
     if (storageMode === "discord") {
       if (!env.DISCORD_WEBHOOK_URL && !env.DISCORD_BOT_TOKEN) {
         return jsonResponse({ error: "Discord 未配置" }, 400);
       }
-      return await uploadToDiscordStorage(arrayBuffer, fileName, fileExtension, contentType, fileSize, env, folderPath);
+      return await rewriteUploadResponseWithShortLinks(
+        await uploadToDiscordStorage(arrayBuffer, fileName, fileExtension, contentType, fileSize, env, folderPath),
+        env
+      );
     }
 
     if (storageMode === "huggingface") {
       if (!hasHuggingFaceConfig(env)) {
         return jsonResponse({ error: "HuggingFace 未配置" }, 400);
       }
-      return await uploadToHFStorage(arrayBuffer, fileName, fileExtension, contentType, fileSize, env, folderPath);
+      return await rewriteUploadResponseWithShortLinks(
+        await uploadToHFStorage(arrayBuffer, fileName, fileExtension, contentType, fileSize, env, folderPath),
+        env
+      );
     }
 
     if (storageMode === "webdav") {
       if (!hasWebDAVConfig(env)) {
         return jsonResponse({ error: "WebDAV 未配置" }, 400);
       }
-      return await uploadToWebDAVStorage(arrayBuffer, fileName, fileExtension, contentType, fileSize, env, folderPath);
+      return await rewriteUploadResponseWithShortLinks(
+        await uploadToWebDAVStorage(arrayBuffer, fileName, fileExtension, contentType, fileSize, env, folderPath),
+        env
+      );
     }
 
     if (storageMode === "github") {
       if (!hasGitHubConfig(env)) {
         return jsonResponse({ error: "GitHub 未配置" }, 400);
       }
-      return await uploadToGitHubStorage(arrayBuffer, fileName, fileExtension, contentType, fileSize, env, folderPath);
+      return await rewriteUploadResponseWithShortLinks(
+        await uploadToGitHubStorage(arrayBuffer, fileName, fileExtension, contentType, fileSize, env, folderPath),
+        env
+      );
     }
 
-    return await uploadToTelegram(arrayBuffer, fileName, fileExtension, contentType, fileSize, env, new URL(request.url).origin, folderPath);
+    return await rewriteUploadResponseWithShortLinks(
+      await uploadToTelegram(arrayBuffer, fileName, fileExtension, contentType, fileSize, env, new URL(request.url).origin, folderPath),
+      env
+    );
   } catch (error) {
     console.error("URL upload error:", error);
     return jsonResponse({ error: `服务器错误：${error.message}` }, 500);
@@ -365,7 +390,8 @@ async function processTelegramSuccess(responseData, fileName, fileExtension, mim
     });
   }
 
-  const directLink = buildTelegramDirectLink(env, directId, fallbackOrigin);
+  const publicSrc = await buildPublicSrc(env, directId);
+  const directLink = buildAbsolutePublicUrl(env, publicSrc, fallbackOrigin);
   try {
     const noticeResult = await sendTelegramUploadNotice(
       {
@@ -389,7 +415,7 @@ async function processTelegramSuccess(responseData, fileName, fileExtension, mim
     console.warn("Telegram upload notice error:", error.message);
   }
 
-  return jsonResponse([{ src: `/file/${directId}` }]);
+  return jsonResponse([{ src: publicSrc, fileSrc: `/file/${directId}` }]);
 }
 
 async function uploadToR2(arrayBuffer, fileName, fileExtension, contentType, fileSize, env, folderPath = "") {

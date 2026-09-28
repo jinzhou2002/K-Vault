@@ -7,15 +7,19 @@ import { hasHuggingFaceConfig, uploadToHuggingFace } from "./utils/huggingface.j
 import { hasWebDAVConfig, normalizeWebDAVPath, uploadToWebDAV } from "./utils/webdav.js";
 import { hasGitHubConfig, normalizeGitHubStoragePath, uploadToGitHub } from "./utils/github.js";
 import {
-  buildTelegramDirectLink,
-  buildTelegramBotApiUrl,
-  createSignedTelegramFileId,
-  getTelegramUploadMethodAndField,
-  pickTelegramFileId,
-  sendTelegramUploadNotice,
-  shouldUseSignedTelegramLinks,
-  shouldWriteTelegramMetadata,
+ buildTelegramBotApiUrl,
+ createSignedTelegramFileId,
+ getTelegramUploadMethodAndField,
+ pickTelegramFileId,
+ sendTelegramUploadNotice,
+ shouldUseSignedTelegramLinks,
+ shouldWriteTelegramMetadata,
 } from "./utils/telegram.js";
+import {
+ buildAbsolutePublicUrl,
+ buildPublicSrc,
+ rewriteUploadResponseWithShortLinks,
+} from "./utils/short-link.js";
 
 const MB = 1024 * 1024;
 
@@ -127,17 +131,18 @@ export async function onRequestPost(context) {
       );
     }
 
-    if (result instanceof Response) {
-      if (!isAdmin) {
-        const status = result.status;
-        if (status >= 200 && status < 300) {
-          await incrementGuestCount(request, env);
-        }
-      }
-      return result;
-    }
+ if (result instanceof Response) {
+ result = await rewriteUploadResponseWithShortLinks(result, env);
+ if (!isAdmin) {
+ const status = result.status;
+ if (status >= 200 && status < 300) {
+ await incrementGuestCount(request, env);
+ }
+ }
+ return result;
+ }
 
-    return result;
+ return result;
   } catch (error) {
     console.error("Upload error:", error);
     return errorResponse(error.message);
@@ -290,34 +295,43 @@ async function uploadToTelegramStorage(
     });
   }
 
-  const directLink = buildTelegramDirectLink(env, directId, fallbackOrigin);
-  try {
-    const noticeResult = await sendTelegramUploadNotice(
-      {
-        chatId: env.TG_Chat_ID,
-        replyToMessageId: messageId || undefined,
-        directLink,
-        fileId,
-        messageId,
-        fileName,
-        fileSize: uploadFile.size,
-      },
-      env
-    );
-    if (!noticeResult?.ok && !noticeResult?.skipped) {
-      console.warn(
-        "Telegram upload notice failed:",
-        noticeResult?.data?.description || noticeResult?.error || "unknown error"
-      );
-    }
-  } catch (error) {
-    console.warn("Telegram upload notice error:", error.message);
-  }
+ const publicSrc = await buildPublicSrc(env, directId);
+ const directLink = buildAbsolutePublicUrl(env, publicSrc, fallbackOrigin);
+ try {
+ const noticeResult = await sendTelegramUploadNotice(
+ {
+ chatId: env.TG_Chat_ID,
+ replyToMessageId: messageId || undefined,
+ directLink,
+ fileId,
+ messageId,
+ fileName,
+ fileSize: uploadFile.size,
+ },
+ env
+ );
+ if (!noticeResult?.ok && !noticeResult?.skipped) {
+ console.warn(
+ "Telegram upload notice failed:",
+ noticeResult?.data?.description || noticeResult?.error || "unknown error"
+ );
+ }
+ } catch (error) {
+ console.warn("Telegram upload notice error:", error.message);
+ }
 
-  return new Response(JSON.stringify([{ src: `/file/${directId}` }]), {
-    status: 200,
-    headers: { "Content-Type": "application/json" },
-  });
+ return new Response(
+ JSON.stringify([
+ {
+ src: publicSrc,
+ fileSrc: `/file/${directId}`,
+ },
+ ]),
+ {
+ status: 200,
+ headers: { "Content-Type": "application/json" },
+ }
+ );
 }
 
 async function sendToTelegram(formData, apiEndpoint, env, retryCount = 0) {
