@@ -371,11 +371,19 @@ async function handleTelegramFile(context, fileId, record = null) {
     );
   }
 
+  const telegramFileUrl = buildTelegramFileUrl(env, filePath);
+
+  // Large media proxied through Cloudflare Pages often becomes CF 502.
+  // Redirect browser/player directly to Telegram for video/audio.
+  if (shouldRedirectTelegramMedia(env, fileName, mimeType)) {
+    return Response.redirect(telegramFileUrl, 302);
+  }
+
   const rangeHeader = request.headers.get('Range');
   const fetchHeaders = new Headers();
   if (rangeHeader) fetchHeaders.set('Range', rangeHeader);
 
-  const upstream = await fetch(buildTelegramFileUrl(env, filePath), {
+  const upstream = await fetch(telegramFileUrl, {
     method: request.method === 'HEAD' ? 'HEAD' : 'GET',
     headers: fetchHeaders,
     cf: { cacheTtl: 0, cacheEverything: false },
@@ -411,12 +419,17 @@ async function handleSignedTelegramFile(context, signedMeta) {
 
   const fileName = signedMeta.fileName || `${signedMeta.fileId}.${signedMeta.fileExtension || 'bin'}`;
   const mimeType = signedMeta.mimeType || getMimeType(fileName);
+  const telegramFileUrl = buildTelegramFileUrl(env, filePath);
+
+  if (shouldRedirectTelegramMedia(env, fileName, mimeType)) {
+    return Response.redirect(telegramFileUrl, 302);
+  }
 
   const rangeHeader = request.headers.get('Range');
   const fetchHeaders = new Headers();
   if (rangeHeader) fetchHeaders.set('Range', rangeHeader);
 
-  const upstream = await fetch(buildTelegramFileUrl(env, filePath), {
+  const upstream = await fetch(telegramFileUrl, {
     method: request.method === 'HEAD' ? 'HEAD' : 'GET',
     headers: fetchHeaders,
     cf: { cacheTtl: 0, cacheEverything: false },
@@ -434,6 +447,20 @@ async function handleSignedTelegramFile(context, signedMeta) {
     statusText: upstream.statusText,
     headers,
   });
+}
+
+function shouldRedirectTelegramMedia(env, fileName = '', mimeType = '') {
+  // Default ON for media. Set TELEGRAM_PROXY_MEDIA=true to force CF proxy.
+  const forceProxy = ['1', 'true', 'yes', 'on'].includes(
+    String(env?.TELEGRAM_PROXY_MEDIA || '').trim().toLowerCase()
+  );
+  if (forceProxy) return false;
+
+  const mime = String(mimeType || getMimeType(fileName) || '').toLowerCase();
+  if (mime.startsWith('video/') || mime.startsWith('audio/')) return true;
+
+  const name = String(fileName || '').toLowerCase();
+  return /\.(mp4|webm|mkv|mov|m4v|avi|wmv|flv|3gp|mp3|wav|flac|aac|m4a|ogg|oga|opus)$/i.test(name);
 }
 
 function buildTelegramFileIdCandidates(fileId, metadata = {}) {
