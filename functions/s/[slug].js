@@ -1,4 +1,4 @@
-import { SHARE_SLUG_KEY_PREFIX } from '../utils/short-link.js';
+const SHARE_SLUG_KEY_PREFIX = 'share_slug:';
 
 function decodePathParam(rawValue = '') {
   try {
@@ -14,9 +14,16 @@ function normalizeSlug(rawValue = '') {
   return value;
 }
 
+function looksLikeMediaFileId(fileId = '') {
+  return /\.(mp4|webm|mkv|mov|m4v|avi|wmv|flv|3gp|mp3|wav|flac|aac|m4a|ogg|oga|opus)(?:$|\?)/i.test(
+    String(fileId || '')
+  );
+}
+
 /**
- * Serve short links by proxying /file/* (no 302).
- * Keeps the browser URL as /s/xxxxxx so copy-link stays short.
+ * Short links:
+ * - Images / docs: proxy (URL stays /s/xxx)
+ * - Video / audio: 302 to /file/... so Range streaming & download work reliably
  */
 export async function onRequest(context) {
   const { request, env, params } = context;
@@ -46,7 +53,20 @@ export async function onRequest(context) {
     targetUrl.searchParams.set(key, value);
   });
 
-  // Proxy instead of redirect so address bar / "copy image address" stay short.
-  const proxyRequest = new Request(targetUrl.toString(), request);
-  return fetch(proxyRequest);
+  // Video/audio need proper byte-range handling — redirect is more reliable than proxy.
+  const rangeHeader = request.headers.get('Range');
+  if (looksLikeMediaFileId(targetId) || rangeHeader) {
+    return Response.redirect(targetUrl.toString(), 302);
+  }
+
+  try {
+    const proxyRequest = new Request(targetUrl.toString(), request);
+    const response = await fetch(proxyRequest);
+    if (response.status >= 500) {
+      return Response.redirect(targetUrl.toString(), 302);
+    }
+    return response;
+  } catch {
+    return Response.redirect(targetUrl.toString(), 302);
+  }
 }
