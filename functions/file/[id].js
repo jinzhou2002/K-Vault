@@ -400,13 +400,20 @@ async function handleTelegramFile(context, fileId, record = null) {
       candidates,
       filePath,
       redirect: shouldRedirectTelegramMedia(env, fileName, mimeType),
+      mode: shouldRedirectTelegramMedia(env, fileName, mimeType) ? 'redirect' : 'proxy',
     });
   }
 
-  // Large media proxied through Cloudflare Pages becomes opaque CF "error code: 502".
-  // Never stream video/audio through the Worker — redirect (or HTML player) instead.
+  const isMedia = isTelegramMediaFile(fileName, mimeType);
+
+  // Browser address bar: same-origin HTML player (video src goes through CF proxy).
+  if (isMedia && shouldServeMediaPlayer(request, url)) {
+    return telegramMediaPlayerResponse(url, fileName, mimeType);
+  }
+
+  // Optional: TELEGRAM_REDIRECT_MEDIA=true (only if clients can reach api.telegram.org).
   if (shouldRedirectTelegramMedia(env, fileName, mimeType)) {
-    return telegramMediaResponse(request, telegramFileUrl, fileName, mimeType);
+    return telegramRedirectResponse(telegramFileUrl);
   }
 
   return proxyTelegramFile(request, telegramFileUrl, fileName, mimeType);
@@ -426,26 +433,61 @@ async function handleSignedTelegramFile(context, signedMeta) {
   const fileName = signedMeta.fileName || `${signedMeta.fileId}.${signedMeta.fileExtension || 'bin'}`;
   const mimeType = signedMeta.mimeType || getMimeType(fileName);
   const telegramFileUrl = buildTelegramFileUrl(env, filePath);
+  const url = new URL(request.url);
+
+  if (url.searchParams.get('diag') === '1') {
+    return jsonResponse({
+      ok: true,
+      fileName,
+      mimeType,
+      filePath,
+      mode: shouldRedirectTelegramMedia(env, fileName, mimeType) ? 'redirect' : 'proxy',
+    });
+  }
+
+  if (isTelegramMediaFile(fileName, mimeType) && shouldServeMediaPlayer(request, url)) {
+    return telegramMediaPlayerResponse(url, fileName, mimeType);
+  }
 
   if (shouldRedirectTelegramMedia(env, fileName, mimeType)) {
-    return telegramMediaResponse(request, telegramFileUrl, fileName, mimeType);
+    return telegramRedirectResponse(telegramFileUrl);
   }
 
   return proxyTelegramFile(request, telegramFileUrl, fileName, mimeType);
 }
 
 function shouldRedirectTelegramMedia(env, fileName = '', mimeType = '') {
-  // Default ON for media. Set TELEGRAM_PROXY_MEDIA=true to force CF proxy (usually breaks).
+  // Default: PROXY via Worker (clients in CN often cannot reach api.telegram.org).
+  // Only set TELEGRAM_REDIRECT_MEDIA=true when viewers can open Telegram directly.
+  const allowRedirect = ['1', 'true', 'yes', 'on'].includes(
+    String(env?.TELEGRAM_REDIRECT_MEDIA || '').trim().toLowerCase()
+  );
+  if (!allowRedirect) return false;
+
+  // Legacy kill-switch: TELEGRAM_PROXY_MEDIA=true forces proxy even if redirect is enabled.
   const forceProxy = ['1', 'true', 'yes', 'on'].includes(
     String(env?.TELEGRAM_PROXY_MEDIA || '').trim().toLowerCase()
   );
   if (forceProxy) return false;
 
+  return isTelegramMediaFile(fileName, mimeType);
+}
+
+function isTelegramMediaFile(fileName = '', mimeType = '') {
   const mime = String(mimeType || getMimeType(fileName) || '').toLowerCase();
   if (mime.startsWith('video/') || mime.startsWith('audio/')) return true;
-
   const name = String(fileName || '').toLowerCase();
   return /\.(mp4|webm|mkv|mov|m4v|avi|wmv|flv|3gp|mp3|wav|flac|aac|m4a|ogg|oga|opus)$/i.test(name);
+}
+
+function shouldServeMediaPlayer(request, url) {
+  if (url.searchParams.get('raw') === '1' || url.searchParams.get('download') === '1') {
+    return false;
+  }
+  if (request.method !== 'GET' || request.headers.get('Range')) return false;
+  if (url.searchParams.get('play') === '1') return true;
+  const accept = String(request.headers.get('Accept') || '');
+  return accept.includes('text/html');
 }
 
 /** Cloudflare replaces Worker HTTP 502 bodies with opaque "error code: 502". Never use 502. */
@@ -467,34 +509,21 @@ function jsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), { status, headers });
 }
 
-/**
- * Serve media without proxying bytes through Cloudflare:
- * - players / download clients: 302 to Telegram CDN
- * - browser address-bar HTML: lightweight player page (same Telegram URL)
- */
-function telegramMediaResponse(request, telegramFileUrl, fileName, mimeType) {
-  const url = new URL(request.url);
-  const accept = String(request.headers.get('Accept') || '');
-  const wantHtml =
-    url.searchParams.get('play') === '1' ||
-    (accept.includes('text/html') &&
-      !url.searchParams.has('raw') &&
-      request.method === 'GET' &&
-      !request.headers.get('Range'));
-
-  if (wantHtml) {
-    const safeName = String(fileName || 'media')
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/"/g, '&quot;');
-    const safeUrl = String(telegramFileUrl)
-      .replace(/&/g, '&amp;')
-      .replace(/"/g, '&quot;');
-    const isAudio = String(mimeType || '').startsWith('audio/');
-    const mediaTag = isAudio
-      ? `<audio controls autoplay src="${safeUrl}" style="width:100%;max-width:720px"></audio>`
-      : `<video controls autoplay playsinline src="${safeUrl}" style="width:100%;max-height:80vh;background:#000"></video>`;
-    const html = `<!DOCTYPE html>
+/** Same-origin player — video/audio bytes still come from ?raw=1 (Worker → Telegram). */
+function telegramMediaPlayerResponse(url, fileName, mimeType) {
+  const rawHref = url.pathname + (url.search ? `${url.search}&` : '?') + 'raw=1';
+  const safeRaw = rawHref.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+  const dlHref = url.pathname + (url.search ? `${url.search}&` : '?') + 'download=1';
+  const safeDl = dlHref.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+  const safeName = String(fileName || 'media')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/"/g, '&quot;');
+  const isAudio = String(mimeType || '').startsWith('audio/');
+  const mediaTag = isAudio
+    ? `<audio controls autoplay src="${safeRaw}" style="width:100%;max-width:720px"></audio>`
+    : `<video controls autoplay playsinline src="${safeRaw}" style="width:100%;max-height:80vh;background:#000"></video>`;
+  const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8"/>
@@ -508,18 +537,18 @@ a{color:#7dd3c7}
 </head>
 <body>
 ${mediaTag}
-<p><a href="${safeUrl}" download="${safeName}">下载 ${safeName}</a>
- · <a href="${safeUrl}">直链</a></p>
+<p><a href="${safeDl}">下载 ${safeName}</a></p>
 </body>
 </html>`;
-    const headers = new Headers();
-    addCorsHeaders(headers);
-    headers.set('Content-Type', 'text/html; charset=utf-8');
-    headers.set('Cache-Control', 'no-store, max-age=0');
-    headers.set('X-KVault-Media', 'player');
-    return new Response(html, { status: 200, headers });
-  }
+  const headers = new Headers();
+  addCorsHeaders(headers);
+  headers.set('Content-Type', 'text/html; charset=utf-8');
+  headers.set('Cache-Control', 'no-store, max-age=0');
+  headers.set('X-KVault-Media', 'player');
+  return new Response(html, { status: 200, headers });
+}
 
+function telegramRedirectResponse(telegramFileUrl) {
   const headers = new Headers();
   addCorsHeaders(headers);
   headers.set('Cache-Control', 'no-store, max-age=0');
@@ -529,9 +558,12 @@ ${mediaTag}
 }
 
 async function proxyTelegramFile(request, telegramFileUrl, fileName, mimeType) {
+  const url = new URL(request.url);
   const rangeHeader = request.headers.get('Range');
   const fetchHeaders = new Headers();
-  if (rangeHeader) fetchHeaders.set('Range', rangeHeader);
+  if (rangeHeader) {
+    fetchHeaders.set('Range', rangeHeader);
+  }
 
   let upstream;
   try {
@@ -548,13 +580,21 @@ async function proxyTelegramFile(request, telegramFileUrl, fileName, mimeType) {
   }
 
   if (!upstream.ok && upstream.status !== 206) {
-    // Do not forward upstream 502 — CF would mask our body.
     const status = upstream.status === 502 ? 424 : upstream.status;
     return errorResponse('Failed to fetch file from Telegram', status);
   }
 
   const headers = new Headers();
   addResponseHeaders(headers, fileName, mimeType, upstream);
+  headers.set('X-KVault-Media', 'proxy');
+
+  if (url.searchParams.get('download') === '1') {
+    const encoded = encodeURIComponent(fileName || 'file');
+    headers.set(
+      'Content-Disposition',
+      `attachment; filename="${encoded}"; filename*=UTF-8''${encoded}`
+    );
+  }
 
   return new Response(upstream.body, {
     status: upstream.status,
