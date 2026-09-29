@@ -36,6 +36,7 @@ function resolveRequiredScope(request) {
   if (method === 'POST' && subPath === '/paste') return 'paste';
   if (method === 'GET' && subPath === '/pastes') return 'read';
   if (method === 'GET' && /^\/paste\/[^/]+$/.test(subPath)) return 'read';
+  if ((method === 'PUT' || method === 'PATCH') && /^\/paste\/[^/]+$/.test(subPath)) return 'paste';
   if (method === 'DELETE' && /^\/paste\/[^/]+$/.test(subPath)) return 'delete';
 
   return '';

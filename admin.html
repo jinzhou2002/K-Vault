@@ -1289,7 +1289,14 @@
                         <el-dropdown-item command="bbcode">BBCode</el-dropdown-item>
                       </el-dropdown-menu>
                     </el-dropdown>
-                    <el-button size="mini" type="info" @click.stop="handleEditName(item)">编辑</el-button>
+                    <el-button size="mini" type="info" @click.stop="handleEditName(item)">改名</el-button>
+                    <el-button
+                      size="mini"
+                      type="success"
+                      v-if="canEditContent(item)"
+                      @click.stop="handleEditContent(item)"
+                      >改内容</el-button
+                    >
                     <el-button size="mini" type="danger" @click.stop="handleDelete(index, item.name)">删除</el-button>
                   </div>
               </div>
@@ -1520,6 +1527,13 @@
                         </el-button>
                         <el-button type="text" size="mini" @click="handleCopy(0, scope.row.name)">复制</el-button>
                         <el-button type="text" size="mini" @click="handleEditName(scope.row)">重命名</el-button>
+                        <el-button
+                          type="text"
+                          size="mini"
+                          v-if="canEditContent(scope.row)"
+                          @click="handleEditContent(scope.row)"
+                          >改内容</el-button
+                        >
                         <el-button type="text" size="mini" @click="openPreview(scope.row)">预览</el-button>
                         <el-button type="text" size="mini" style="color:#f56c6c" @click="handleDelete(0, scope.row.name)">删除</el-button>
                       </div>
@@ -4406,6 +4420,76 @@ curl -X POST "{SITE_URL}/api/v1/import" \
           })
           .catch(() => this.$message.error('修改文件名时出错，请检查网络连接'));
         }).catch(() => {});
+      },
+      canEditContent(item) {
+        const name = String(item?.metadata?.fileName || item?.name || '');
+        const ext = name.includes('.') ? name.split('.').pop().toLowerCase() : '';
+        const textExts = new Set([
+          'txt', 'md', 'markdown', 'json', 'xml', 'csv', 'log', 'css', 'js', 'ts',
+          'html', 'htm', 'svg', 'yml', 'yaml', 'ini', 'conf', 'sql', 'py', 'sh'
+        ]);
+        return textExts.has(ext) || Boolean(item?.metadata?.contentOverridden);
+      },
+      async handleEditContent(item) {
+        if (!item?.name) return;
+        const loading = this.$loading({ text: '读取文档内容...' });
+        let current = '';
+        try {
+          const res = await fetch(`./file/${encodeURIComponent(item.name)}`, {
+            credentials: 'include',
+            headers: { Accept: 'text/plain, text/*, */*' },
+          });
+          if (!res.ok) throw new Error('读取失败');
+          current = await res.text();
+        } catch (e) {
+          loading.close();
+          this.$message.error('无法读取文件内容（可能不是可编辑文本）');
+          return;
+        }
+        loading.close();
+
+        this.$prompt('保存后分享链接不变（含短链）', '在线修改文档内容', {
+          inputType: 'textarea',
+          inputValue: current,
+          customClass: 'content-edit-prompt',
+          confirmButtonText: '保存',
+          cancelButtonText: '取消',
+          inputValidator: (value) => {
+            if (value == null) return '内容不能为空';
+            if (String(value).length > 1024 * 1024) return '内容不能超过 1MB';
+            return true;
+          },
+        })
+          .then(async ({ value }) => {
+            const saveLoading = this.$loading({ text: '保存中...' });
+            try {
+              const res = await fetch(
+                `./api/manage/content/${encodeURIComponent(item.name)}`,
+                {
+                  method: 'PUT',
+                  credentials: 'include',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ content: value }),
+                }
+              );
+              const result = await res.json();
+              saveLoading.close();
+              if (result.success) {
+                if (item.metadata) {
+                  item.metadata.contentOverridden = true;
+                  item.metadata.fileSize = result.size;
+                  item.metadata.contentUpdatedAt = result.updatedAt;
+                }
+                this.$message.success('内容已更新，分享链接未变');
+              } else {
+                this.$message.error(result.error || '保存失败');
+              }
+            } catch (e) {
+              saveLoading.close();
+              this.$message.error('保存失败，请检查网络');
+            }
+          })
+          .catch(() => {});
       },
       // 加载设置处理
       handleLoadSettings(command) {

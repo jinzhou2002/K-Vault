@@ -288,3 +288,115 @@ export async function deletePasteById(id, env) {
   await env.img_url.delete(buildKey(pasteId));
   return true;
 }
+
+/**
+ * Update paste content in place. Same id / share URL is preserved.
+ */
+export async function updatePasteById(
+  id,
+  {
+    content,
+    language,
+    expiresIn,
+    password,
+    clearPassword = false,
+  } = {},
+  env
+) {
+  ensureKv(env);
+  const pasteId = normalizePasteId(id);
+  if (!pasteId) {
+    return {
+      ok: false,
+      status: 404,
+      code: 'PASTE_NOT_FOUND',
+      message: 'Paste not found.',
+    };
+  }
+
+  const existing = await env.img_url.get(buildKey(pasteId), { type: 'json' });
+  if (!existing || typeof existing !== 'object') {
+    return {
+      ok: false,
+      status: 404,
+      code: 'PASTE_NOT_FOUND',
+      message: 'Paste not found.',
+    };
+  }
+
+  if (isExpired(existing)) {
+    await env.img_url.delete(buildKey(pasteId));
+    return {
+      ok: false,
+      status: 404,
+      code: 'PASTE_EXPIRED',
+      message: 'Paste has expired.',
+    };
+  }
+
+  const nextContent =
+    content == null ? String(existing.content || '') : String(content);
+  if (!String(nextContent).trim()) {
+    return {
+      ok: false,
+      status: 400,
+      code: 'VALIDATION_ERROR',
+      message: 'Paste content is required.',
+    };
+  }
+
+  const byteLength = new TextEncoder().encode(nextContent).byteLength;
+  if (byteLength > MAX_CONTENT_SIZE) {
+    return {
+      ok: false,
+      status: 400,
+      code: 'VALIDATION_ERROR',
+      message: 'Paste content exceeds 1 MiB limit.',
+    };
+  }
+
+  const now = Date.now();
+  const record = {
+    ...existing,
+    content: nextContent,
+    size: byteLength,
+    updatedAt: now,
+  };
+
+  if (language != null && String(language).trim() !== '') {
+    record.language = normalizeLanguage(language);
+  }
+
+  if (expiresIn !== undefined) {
+    const expiresInSeconds = normalizeExpiresIn(expiresIn);
+    record.expiresAt = expiresInSeconds ? now + expiresInSeconds * 1000 : null;
+  }
+
+  if (clearPassword) {
+    record.passwordHash = null;
+    record.passwordSalt = null;
+  } else if (password != null && String(password) !== '') {
+    const passwordSalt = randomString(PASTE_SALT_LENGTH);
+    record.passwordSalt = passwordSalt;
+    record.passwordHash = await hashPassword(String(password), passwordSalt);
+  }
+
+  const kvOptions = {
+    metadata: {
+      ...summarize(record),
+      updatedAt: now,
+    },
+  };
+
+  const remainingTtlMs = Number(record.expiresAt || 0) - now;
+  if (Number.isFinite(remainingTtlMs) && remainingTtlMs > 1000) {
+    kvOptions.expirationTtl = Math.ceil(remainingTtlMs / 1000);
+  }
+
+  await env.img_url.put(buildKey(pasteId), JSON.stringify(record), kvOptions);
+
+  return {
+    ok: true,
+    paste: summarize(record),
+  };
+}

@@ -9,6 +9,7 @@ import {
   parseSignedTelegramFileId,
   shouldWriteTelegramMetadata,
 } from '../utils/telegram.js';
+import { getFileContentOverride } from '../utils/file-content.js';
 
 const STORAGE_PREFIXES = ['img:', 'vid:', 'aud:', 'doc:', 'r2:', 's3:', 'discord:', 'hf:', 'webdav:', 'github:', ''];
 
@@ -91,6 +92,38 @@ export async function onRequest(context) {
       shareAccess = await verifyShareAccess(context, record.metadata, kvKey);
       if (shareAccess?.response) {
         return shareAccess.response;
+      }
+    }
+
+    // Prefer in-place text overrides so share links (/file|/s) stay stable.
+    if (env.img_url) {
+      const override = await getFileContentOverride(env, kvKey);
+      if (override && override.content != null) {
+        const fileName = record?.metadata?.fileName || kvKey;
+        const headers = new Headers({
+          'Content-Type': override.contentType || 'text/plain; charset=utf-8',
+          'Cache-Control': 'public, max-age=60',
+          'X-Content-Override': '1',
+        });
+        const encoded = encodeURIComponent(fileName);
+        headers.set(
+          'Content-Disposition',
+          `inline; filename="${encoded}"; filename*=UTF-8''${encoded}`
+        );
+        const response = new Response(override.content, { status: 200, headers });
+        if (shareAccess?.trackDownload && shouldCountAsDownload(request.method, response)) {
+          const updatePromise = incrementShareDownloadCount(
+            env,
+            shareAccess.kvKey,
+            shareAccess.metadata
+          );
+          if (typeof context.waitUntil === 'function') {
+            context.waitUntil(updatePromise.catch(() => {}));
+          } else {
+            updatePromise.catch(() => {});
+          }
+        }
+        return response;
       }
     }
 

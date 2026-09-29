@@ -316,6 +316,14 @@ body::before {
   vertical-align: middle;
 }
 
+/* Admin content editor prompt */
+.content-edit-prompt .el-textarea__inner {
+  min-height: 280px !important;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 html[data-theme="dark"] .short-badge {
   color: #99f6e4;
   background: rgba(15, 118, 110, 0.35);
