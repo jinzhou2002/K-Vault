@@ -161,7 +161,8 @@ export async function onRequest(context) {
     return response;
   } catch (error) {
     console.error('file route error:', error);
-    return errorResponse(`File proxy error: ${error?.message || 'Unknown error'}`, 502);
+    // Avoid HTTP 502 — Cloudflare replaces Worker 502 bodies with opaque "error code: 502".
+    return errorResponse(`File proxy error: ${error?.message || 'Unknown error'}`, 500);
   }
 }
 
@@ -354,6 +355,7 @@ async function handleTelegramFile(context, fileId, record = null) {
   const candidates = buildTelegramFileIdCandidates(fileId, metadata);
   let filePath = null;
   let lastError = '';
+  const candidateErrors = [];
 
   for (const candidate of candidates) {
     const result = await getTelegramFilePath(env, candidate);
@@ -362,45 +364,52 @@ async function handleTelegramFile(context, fileId, record = null) {
       break;
     }
     lastError = result?.error || lastError || 'unknown error';
+    candidateErrors.push({
+      id: candidate.slice(0, 24) + (candidate.length > 24 ? '…' : ''),
+      error: result?.error || 'unknown error',
+    });
   }
 
   if (!filePath) {
-    return errorResponse(
-      `Failed to get file path from Telegram: ${lastError || 'unknown error'}`,
-      502
-    );
+    if (url.searchParams.get('diag') === '1') {
+      return jsonResponse(
+        {
+          ok: false,
+          fileName,
+          mimeType,
+          candidates: candidateErrors,
+          error: lastError || 'unknown error',
+          hint: /too big/i.test(lastError)
+            ? 'Official Telegram Bot API cannot download files larger than ~20MB. Use R2 or a local Bot API.'
+            : 'Check TG_Bot_Token matches the bot that received the file, and that file_id is intact.',
+        },
+        424
+      );
+    }
+    return telegramPathErrorResponse(lastError);
   }
 
   const telegramFileUrl = buildTelegramFileUrl(env, filePath);
 
-  // Large media proxied through Cloudflare Pages often becomes CF 502.
-  // Redirect browser/player directly to Telegram for video/audio.
+  // ?diag=1 — return getFile result without streaming (for troubleshooting)
+  if (url.searchParams.get('diag') === '1') {
+    return jsonResponse({
+      ok: true,
+      fileName,
+      mimeType,
+      candidates,
+      filePath,
+      redirect: shouldRedirectTelegramMedia(env, fileName, mimeType),
+    });
+  }
+
+  // Large media proxied through Cloudflare Pages becomes opaque CF "error code: 502".
+  // Never stream video/audio through the Worker — redirect (or HTML player) instead.
   if (shouldRedirectTelegramMedia(env, fileName, mimeType)) {
-    return Response.redirect(telegramFileUrl, 302);
+    return telegramMediaResponse(request, telegramFileUrl, fileName, mimeType);
   }
 
-  const rangeHeader = request.headers.get('Range');
-  const fetchHeaders = new Headers();
-  if (rangeHeader) fetchHeaders.set('Range', rangeHeader);
-
-  const upstream = await fetch(telegramFileUrl, {
-    method: request.method === 'HEAD' ? 'HEAD' : 'GET',
-    headers: fetchHeaders,
-    cf: { cacheTtl: 0, cacheEverything: false },
-  });
-
-  if (!upstream.ok && upstream.status !== 206) {
-    return errorResponse('Failed to fetch file from Telegram', upstream.status);
-  }
-
-  const headers = new Headers();
-  addResponseHeaders(headers, fileName, mimeType, upstream);
-
-  return new Response(upstream.body, {
-    status: upstream.status,
-    statusText: upstream.statusText,
-    headers,
-  });
+  return proxyTelegramFile(request, telegramFileUrl, fileName, mimeType);
 }
 
 async function handleSignedTelegramFile(context, signedMeta) {
@@ -408,10 +417,7 @@ async function handleSignedTelegramFile(context, signedMeta) {
 
   const pathResult = await getTelegramFilePath(env, signedMeta.fileId);
   if (!pathResult?.path) {
-    return errorResponse(
-      `Failed to get file path from Telegram: ${pathResult?.error || 'unknown error'}`,
-      502
-    );
+    return telegramPathErrorResponse(pathResult?.error);
   }
   const filePath = pathResult.path;
 
@@ -422,35 +428,14 @@ async function handleSignedTelegramFile(context, signedMeta) {
   const telegramFileUrl = buildTelegramFileUrl(env, filePath);
 
   if (shouldRedirectTelegramMedia(env, fileName, mimeType)) {
-    return Response.redirect(telegramFileUrl, 302);
+    return telegramMediaResponse(request, telegramFileUrl, fileName, mimeType);
   }
 
-  const rangeHeader = request.headers.get('Range');
-  const fetchHeaders = new Headers();
-  if (rangeHeader) fetchHeaders.set('Range', rangeHeader);
-
-  const upstream = await fetch(telegramFileUrl, {
-    method: request.method === 'HEAD' ? 'HEAD' : 'GET',
-    headers: fetchHeaders,
-    cf: { cacheTtl: 0, cacheEverything: false },
-  });
-
-  if (!upstream.ok && upstream.status !== 206) {
-    return errorResponse('Failed to fetch file from Telegram', upstream.status);
-  }
-
-  const headers = new Headers();
-  addResponseHeaders(headers, fileName, mimeType, upstream);
-
-  return new Response(upstream.body, {
-    status: upstream.status,
-    statusText: upstream.statusText,
-    headers,
-  });
+  return proxyTelegramFile(request, telegramFileUrl, fileName, mimeType);
 }
 
 function shouldRedirectTelegramMedia(env, fileName = '', mimeType = '') {
-  // Default ON for media. Set TELEGRAM_PROXY_MEDIA=true to force CF proxy.
+  // Default ON for media. Set TELEGRAM_PROXY_MEDIA=true to force CF proxy (usually breaks).
   const forceProxy = ['1', 'true', 'yes', 'on'].includes(
     String(env?.TELEGRAM_PROXY_MEDIA || '').trim().toLowerCase()
   );
@@ -461,6 +446,121 @@ function shouldRedirectTelegramMedia(env, fileName = '', mimeType = '') {
 
   const name = String(fileName || '').toLowerCase();
   return /\.(mp4|webm|mkv|mov|m4v|avi|wmv|flv|3gp|mp3|wav|flac|aac|m4a|ogg|oga|opus)$/i.test(name);
+}
+
+/** Cloudflare replaces Worker HTTP 502 bodies with opaque "error code: 502". Never use 502. */
+function telegramPathErrorResponse(lastError = '') {
+  const detail = String(lastError || 'unknown error');
+  const tooBig = /too big|FILE_TOO_BIG|file is too big/i.test(detail);
+  const message = tooBig
+    ? `Telegram Bot API cannot download this file (limit ~20MB). Re-upload under 20MB, or use R2 storage / a local Bot API server. Detail: ${detail}`
+    : `Failed to get file path from Telegram: ${detail}`;
+  // 424 keeps the real message visible (unlike 502 which CF masks).
+  return errorResponse(message, 424);
+}
+
+function jsonResponse(data, status = 200) {
+  const headers = new Headers();
+  addCorsHeaders(headers);
+  headers.set('Content-Type', 'application/json; charset=utf-8');
+  headers.set('Cache-Control', 'no-store, max-age=0');
+  return new Response(JSON.stringify(data, null, 2), { status, headers });
+}
+
+/**
+ * Serve media without proxying bytes through Cloudflare:
+ * - players / download clients: 302 to Telegram CDN
+ * - browser address-bar HTML: lightweight player page (same Telegram URL)
+ */
+function telegramMediaResponse(request, telegramFileUrl, fileName, mimeType) {
+  const url = new URL(request.url);
+  const accept = String(request.headers.get('Accept') || '');
+  const wantHtml =
+    url.searchParams.get('play') === '1' ||
+    (accept.includes('text/html') &&
+      !url.searchParams.has('raw') &&
+      request.method === 'GET' &&
+      !request.headers.get('Range'));
+
+  if (wantHtml) {
+    const safeName = String(fileName || 'media')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/"/g, '&quot;');
+    const safeUrl = String(telegramFileUrl)
+      .replace(/&/g, '&amp;')
+      .replace(/"/g, '&quot;');
+    const isAudio = String(mimeType || '').startsWith('audio/');
+    const mediaTag = isAudio
+      ? `<audio controls autoplay src="${safeUrl}" style="width:100%;max-width:720px"></audio>`
+      : `<video controls autoplay playsinline src="${safeUrl}" style="width:100%;max-height:80vh;background:#000"></video>`;
+    const html = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>${safeName}</title>
+<style>
+body{margin:0;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1rem;
+font-family:system-ui,sans-serif;background:#0b1220;color:#e8eefc;padding:1.5rem;box-sizing:border-box}
+a{color:#7dd3c7}
+</style>
+</head>
+<body>
+${mediaTag}
+<p><a href="${safeUrl}" download="${safeName}">下载 ${safeName}</a>
+ · <a href="${safeUrl}">直链</a></p>
+</body>
+</html>`;
+    const headers = new Headers();
+    addCorsHeaders(headers);
+    headers.set('Content-Type', 'text/html; charset=utf-8');
+    headers.set('Cache-Control', 'no-store, max-age=0');
+    headers.set('X-KVault-Media', 'player');
+    return new Response(html, { status: 200, headers });
+  }
+
+  const headers = new Headers();
+  addCorsHeaders(headers);
+  headers.set('Cache-Control', 'no-store, max-age=0');
+  headers.set('X-KVault-Media', 'redirect');
+  headers.set('Location', telegramFileUrl);
+  return new Response(null, { status: 302, headers });
+}
+
+async function proxyTelegramFile(request, telegramFileUrl, fileName, mimeType) {
+  const rangeHeader = request.headers.get('Range');
+  const fetchHeaders = new Headers();
+  if (rangeHeader) fetchHeaders.set('Range', rangeHeader);
+
+  let upstream;
+  try {
+    upstream = await fetch(telegramFileUrl, {
+      method: request.method === 'HEAD' ? 'HEAD' : 'GET',
+      headers: fetchHeaders,
+      cf: { cacheTtl: 0, cacheEverything: false },
+    });
+  } catch (error) {
+    return errorResponse(
+      `Telegram fetch failed: ${error?.message || 'network error'}`,
+      424
+    );
+  }
+
+  if (!upstream.ok && upstream.status !== 206) {
+    // Do not forward upstream 502 — CF would mask our body.
+    const status = upstream.status === 502 ? 424 : upstream.status;
+    return errorResponse('Failed to fetch file from Telegram', status);
+  }
+
+  const headers = new Headers();
+  addResponseHeaders(headers, fileName, mimeType, upstream);
+
+  return new Response(upstream.body, {
+    status: upstream.status,
+    statusText: upstream.statusText,
+    headers,
+  });
 }
 
 function buildTelegramFileIdCandidates(fileId, metadata = {}) {
