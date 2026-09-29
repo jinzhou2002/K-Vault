@@ -47,11 +47,9 @@ export async function onRequest(context) {
     targetId = rawValue;
   }
 
-  const targetUrl = new URL(`/file/${encodeURIComponent(targetId)}`, request.url);
-  const sourceUrl = new URL(request.url);
-  sourceUrl.searchParams.forEach((value, key) => {
-    targetUrl.searchParams.set(key, value);
-  });
+  // Keep Telegram file ids intact (do not over-encode).
+  const targetUrl = new URL(request.url);
+  targetUrl.pathname = `/file/${targetId}`;
 
   // Video/audio need proper byte-range handling — redirect is more reliable than proxy.
   const rangeHeader = request.headers.get('Range');

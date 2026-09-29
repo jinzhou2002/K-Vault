@@ -351,10 +351,24 @@ async function handleTelegramFile(context, fileId, record = null) {
   const fileName = metadata.fileName || fileId;
   const mimeType = getMimeType(fileName);
 
-  const telegramFileId = String(fileId).split('.')[0];
-  const filePath = await getTelegramFilePath(env, telegramFileId);
+  const candidates = buildTelegramFileIdCandidates(fileId, metadata);
+  let filePath = null;
+  let lastError = '';
+
+  for (const candidate of candidates) {
+    const result = await getTelegramFilePath(env, candidate);
+    if (result?.path) {
+      filePath = result.path;
+      break;
+    }
+    lastError = result?.error || lastError || 'unknown error';
+  }
+
   if (!filePath) {
-    return errorResponse('Failed to get file path from Telegram', 500);
+    return errorResponse(
+      `Failed to get file path from Telegram: ${lastError || 'unknown error'}`,
+      502
+    );
   }
 
   const rangeHeader = request.headers.get('Range');
@@ -384,10 +398,14 @@ async function handleTelegramFile(context, fileId, record = null) {
 async function handleSignedTelegramFile(context, signedMeta) {
   const { request, env } = context;
 
-  const filePath = await getTelegramFilePath(env, signedMeta.fileId);
-  if (!filePath) {
-    return errorResponse('Failed to get file path from Telegram', 500);
+  const pathResult = await getTelegramFilePath(env, signedMeta.fileId);
+  if (!pathResult?.path) {
+    return errorResponse(
+      `Failed to get file path from Telegram: ${pathResult?.error || 'unknown error'}`,
+      502
+    );
   }
+  const filePath = pathResult.path;
 
   await backfillSignedTelegramMetadata(env, signedMeta);
 
@@ -416,6 +434,36 @@ async function handleSignedTelegramFile(context, signedMeta) {
     statusText: upstream.statusText,
     headers,
   });
+}
+
+function buildTelegramFileIdCandidates(fileId, metadata = {}) {
+  const out = [];
+  const push = (value) => {
+    const id = String(value || '').trim();
+    if (!id) return;
+    if (!out.includes(id)) out.push(id);
+  };
+
+  // Prefer the id stored at upload time.
+  push(metadata.telegramFileId);
+
+  let raw = String(fileId || '').trim();
+  try {
+    raw = decodeURIComponent(raw);
+  } catch {
+    // keep raw
+  }
+  push(raw);
+
+  // Strip a single trailing ".ext"
+  const stripped = raw.replace(/\.([a-z0-9]{1,10})$/i, '');
+  if (stripped && stripped !== raw) push(stripped);
+
+  // Legacy behavior (first segment before ".") — keep as last resort.
+  const firstSegment = raw.split('.')[0];
+  push(firstSegment);
+
+  return out;
 }
 
 async function backfillSignedTelegramMetadata(env, signedMeta) {
@@ -777,16 +825,41 @@ async function findRecordByPrefixes(env, fileId, prefixes = []) {
 }
 
 async function getTelegramFilePath(env, fileId) {
-  try {
-    const url = `${buildTelegramBotApiUrl(env, 'getFile')}?file_id=${encodeURIComponent(fileId)}`;
-    const response = await fetch(url, { method: 'GET' });
-    if (!response.ok) return null;
+  const id = String(fileId || '').trim();
+  if (!id) {
+    return { path: null, error: 'empty file_id' };
+  }
 
-    const data = await response.json();
-    if (!data?.ok || !data?.result?.file_path) return null;
-    return data.result.file_path;
+  if (!env?.TG_Bot_Token) {
+    return { path: null, error: 'TG_Bot_Token is not configured' };
+  }
+
+  try {
+    const url = `${buildTelegramBotApiUrl(env, 'getFile')}?file_id=${encodeURIComponent(id)}`;
+    const response = await fetch(url, { method: 'GET' });
+    let data = null;
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+
+    if (data?.ok && data?.result?.file_path) {
+      return { path: data.result.file_path, error: null };
+    }
+
+    const description = data?.description || `HTTP ${response.status}`;
+    // Common Telegram cases:
+    // - wrong/rotated bot token
+    // - invalid/expired file_id
+    // - file bigger than 20MB on official Bot API (needs local Bot API)
+    return {
+      path: null,
+      error: description,
+      errorCode: data?.error_code || response.status,
+    };
   } catch (error) {
     console.error('getTelegramFilePath failed:', error);
-    return null;
+    return { path: null, error: error?.message || 'network error' };
   }
 }
